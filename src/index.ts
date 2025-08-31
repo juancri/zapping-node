@@ -279,7 +279,7 @@ class ZappingUI {
 			top: 'center',
 			left: 'center',
 			width: '60%',
-			height: '50%',
+			height: '60%',
 			border: {
 				type: 'line'
 			},
@@ -297,7 +297,7 @@ class ZappingUI {
 			top: 1,
 			left: 1,
 			width: '100%-2',
-			height: '100%-4',
+			height: '100%-8',
 			border: {
 				type: 'line'
 			},
@@ -328,14 +328,29 @@ class ZappingUI {
 			]
 		});
 
+		// Record checkbox
+		const recordCheckbox = blessed.checkbox({
+			parent: modeDialog,
+			bottom: 4,
+			left: 2,
+			width: 'shrink',
+			height: 1,
+			text: 'Record instead of play (requires ffmpeg)',
+			keys: true,
+			mouse: true,
+			style: {
+				fg: 'magenta'
+			}
+		});
+
 		// Instructions
 		blessed.box({
 			parent: modeDialog,
 			bottom: 0,
 			left: 1,
 			width: '100%-2',
-			height: 2,
-			content: '{center}{bold}[↑↓] to navigate • [Enter] to select • [ESC] to cancel{/bold}{/center}',
+			height: 3,
+			content: '{center}{bold}[↑↓] to navigate • [Space] to toggle record • [Enter] to select • [ESC] to cancel{/bold}{/center}',
 			tags: true,
 			style: {
 				fg: 'cyan'
@@ -344,16 +359,32 @@ class ZappingUI {
 
 		modeList.focus();
 
+		// Handle tab navigation between list and checkbox
+		modeList.key(['tab'], () => {
+			recordCheckbox.focus();
+			this.screen.render();
+		});
+
+		recordCheckbox.key(['tab'], () => {
+			modeList.focus();
+			this.screen.render();
+		});
+
 		modeList.on('select', (_item: blessed.Widgets.BlessedElement, index: number) => {
+			const isRecording = recordCheckbox.checked;
 			modeDialog.destroy();
 			this.screen.render();
 
 			switch (index) {
 				case 0: // Live
-					this.playChannel(channel);
+					if (isRecording) {
+						this.recordChannel(channel);
+					} else {
+						this.playChannel(channel);
+					}
 					break;
 				case 1: // Time
-					this.showTimeInputDialog(channel);
+					this.showTimeInputDialog(channel, isRecording);
 					break;
 			}
 		});
@@ -363,10 +394,15 @@ class ZappingUI {
 			this.screen.render();
 		});
 
+		recordCheckbox.key(['escape'], () => {
+			modeDialog.destroy();
+			this.screen.render();
+		});
+
 		this.screen.render();
 	}
 
-	private showTimeInputDialog(channel: Channel): void {
+	private showTimeInputDialog(channel: Channel, isRecording = false): void {
 		const timeDialog = blessed.box({
 			parent: this.screen,
 			top: 'center',
@@ -442,7 +478,11 @@ class ZappingUI {
 			timeDialog.destroy();
 			this.screen.render();
 			
-			await this.playChannelAtTime(channel, parsedTime);
+			if (isRecording) {
+				await this.recordChannelAtTime(channel, parsedTime);
+			} else {
+				await this.playChannelAtTime(channel, parsedTime);
+			}
 		});
 
 		timeInput.key(['escape'], () => {
@@ -451,6 +491,94 @@ class ZappingUI {
 		});
 
 		this.screen.render();
+	}
+
+	private async recordChannel(channel: Channel): Promise<void> {
+		if (!this.token) {
+			Logger.error('MAIN', 'No authentication token available');
+			return;
+		}
+
+		try {
+			// Check if ffmpeg is available
+			const ffmpegAvailable = await PlayerService.checkFfmpegAvailable();
+			if (!ffmpegAvailable) {
+				this.showError('FFmpeg not found. Please install ffmpeg to record channels.');
+				return;
+			}
+
+			// Hide the UI and start recording
+			this.screen.destroy();
+			
+			// Start channel recording and wait for it to complete
+			Logger.info('MAIN', `Recording ${channel.name}: Live`);
+			await this.playerService.recordChannel(channel, this.token);
+			
+			// Recreate the UI after recording ends
+			this.screen = blessed.screen({
+				smartCSR: true,
+				title: 'Zapping TV'
+			});
+			this.setupKeyBindings();
+			this.createMainUI();
+			await this.loadChannels();
+			
+		} catch (error) {
+			Logger.error('MAIN', 'Failed to record channel:', error);
+			// Ensure UI is restored even on error
+			this.screen = blessed.screen({
+				smartCSR: true,
+				title: 'Zapping TV'
+			});
+			this.setupKeyBindings();
+			this.createMainUI();
+			await this.loadChannels();
+			this.showError(`Recording failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
+	private async recordChannelAtTime(channel: Channel, parsedTime: { timestamp: number; description: string }): Promise<void> {
+		if (!this.token) {
+			Logger.error('MAIN', 'No authentication token available');
+			return;
+		}
+
+		try {
+			// Check if ffmpeg is available
+			const ffmpegAvailable = await PlayerService.checkFfmpegAvailable();
+			if (!ffmpegAvailable) {
+				this.showError('FFmpeg not found. Please install ffmpeg to record channels.');
+				return;
+			}
+
+			// Hide the UI and start recording
+			this.screen.destroy();
+			
+			// Start time-based channel recording and wait for it to complete
+			Logger.info('MAIN', `Recording ${channel.name}: ${parsedTime.description}`);
+			await this.playerService.recordChannelAtTime(channel, this.token, parsedTime.timestamp);
+			
+			// Recreate the UI after recording ends
+			this.screen = blessed.screen({
+				smartCSR: true,
+				title: 'Zapping TV'
+			});
+			this.setupKeyBindings();
+			this.createMainUI();
+			await this.loadChannels();
+			
+		} catch (error) {
+			Logger.error('MAIN', 'Failed to record channel at time:', error);
+			// Ensure UI is restored even on error
+			this.screen = blessed.screen({
+				smartCSR: true,
+				title: 'Zapping TV'
+			});
+			this.setupKeyBindings();
+			this.createMainUI();
+			await this.loadChannels();
+			this.showError(`Recording failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
 	}
 
 	private async playChannelAtTime(channel: Channel, parsedTime: { timestamp: number; description: string }): Promise<void> {
@@ -644,6 +772,7 @@ async function runCLI() {
 		.version('1.0.0')
 		.option('-c, --channel <name>', 'channel name or number to play')
 		.option('-t, --time <expression>', 'time expression for previous programming (e.g., "2 hours ago", "yesterday 3pm")')
+		.option('-r, --record', 'record the stream to a file instead of playing (requires ffmpeg)')
 		.option('-l, --list', 'list available channels')
 		.option('-e, --examples', 'show examples of supported time expressions')
 		.parse();
@@ -715,7 +844,18 @@ async function runCLI() {
 				process.exit(1);
 			}
 
-			// Time-based playback
+			const isRecording = options['record'];
+
+			// Check if ffmpeg is available when recording
+			if (isRecording) {
+				const ffmpegAvailable = await PlayerService.checkFfmpegAvailable();
+				if (!ffmpegAvailable) {
+					console.error('FFmpeg not found. Please install ffmpeg to record channels.');
+					process.exit(1);
+				}
+			}
+
+			// Time-based playback/recording
 			if (options['time']) {
 				const parsedTime = TimeParser.parseTimeExpression(options['time']);
 				if (!parsedTime) {
@@ -724,12 +864,22 @@ async function runCLI() {
 					process.exit(1);
 				}
 
-				console.log(`Playing ${channel.name}: ${parsedTime.description}`);
-				await playerService.playChannelAtTime(channel, token, parsedTime.timestamp);
+				if (isRecording) {
+					console.log(`Recording ${channel.name}: ${parsedTime.description}`);
+					await playerService.recordChannelAtTime(channel, token, parsedTime.timestamp);
+				} else {
+					console.log(`Playing ${channel.name}: ${parsedTime.description}`);
+					await playerService.playChannelAtTime(channel, token, parsedTime.timestamp);
+				}
 			} else {
-				// Live playback
-				console.log(`Playing ${channel.name}: Live`);
-				await playerService.playChannel(channel, token);
+				// Live playback/recording
+				if (isRecording) {
+					console.log(`Recording ${channel.name}: Live`);
+					await playerService.recordChannel(channel, token);
+				} else {
+					console.log(`Playing ${channel.name}: Live`);
+					await playerService.playChannel(channel, token);
+				}
 			}
 			return;
 		}

@@ -7,6 +7,7 @@ import { Logger } from './logger';
 export class PlayerService {
 	private apiService: ApiService;
 	private mpvProcess: ChildProcess | null = null;
+	private ffmpegProcess: ChildProcess | null = null;
 	private heartbeatInterval: NodeJS.Timeout | null = null;
 	private playToken: string | null = null;
 
@@ -37,6 +38,83 @@ export class PlayerService {
 			await this.startMpvPlayer(streamUrl);
 		} catch (error) {
 			Logger.error('PLAYER', 'Failed to start playback:', error);
+			this.cleanup();
+			throw error;
+		}
+	}
+
+	async recordChannel(channel: Channel, token: string, filename?: string): Promise<void> {
+		try {
+			Logger.info(
+				'PLAYER',
+				`Starting recording for channel ${channel.number}: ${channel.name}`
+			);
+
+			// Get play token from DrHouse
+			Logger.info('PLAYER', 'Getting play token...');
+			this.playToken = await this.apiService.getDrHousePlayToken(token);
+
+			// Construct stream URL
+			const streamUrl = `${channel.url}?token=${this.playToken}`;
+
+			// Start heartbeat to maintain session
+			this.startHeartbeat();
+
+			// Generate filename if not provided
+			const recordingFilename = filename || this.generateRecordingFilename();
+
+			// Start ffmpeg recorder and wait for it to complete
+			Logger.info(
+				'PLAYER',
+				`Starting ffmpeg recorder... Recording to: ${recordingFilename}`
+			);
+			await this.startFfmpegRecorder(streamUrl, recordingFilename);
+		} catch (error) {
+			Logger.error('PLAYER', 'Failed to start recording:', error);
+			this.cleanup();
+			throw error;
+		}
+	}
+
+	async recordChannelAtTime(
+		channel: Channel,
+		token: string,
+		startTime: number,
+		endTime?: number,
+		filename?: string
+	): Promise<void> {
+		try {
+			Logger.info(
+				'PLAYER',
+				`Starting time-based recording for channel ${channel.number}: ${channel.name} at timestamp ${startTime}`
+			);
+
+			// Get play token from DrHouse
+			Logger.info('PLAYER', 'Getting play token...');
+			this.playToken = await this.apiService.getDrHousePlayToken(token);
+
+			// Construct stream URL with time parameters
+			let streamUrl = `${channel.url}?token=${this.playToken}&startTime=${startTime}`;
+			if (endTime) {
+				streamUrl += `&endTime=${endTime}`;
+			}
+
+			Logger.info('PLAYER', `Stream URL: ${streamUrl}`);
+
+			// Start heartbeat to maintain session
+			this.startHeartbeat();
+
+			// Generate filename if not provided
+			const recordingFilename = filename || this.generateRecordingFilename();
+
+			// Start ffmpeg recorder and wait for it to complete
+			Logger.info(
+				'PLAYER',
+				`Starting ffmpeg recorder... Recording to: ${recordingFilename}`
+			);
+			await this.startFfmpegRecorder(streamUrl, recordingFilename);
+		} catch (error) {
+			Logger.error('PLAYER', 'Failed to start time-based recording:', error);
 			this.cleanup();
 			throw error;
 		}
@@ -109,6 +187,55 @@ export class PlayerService {
 		});
 	}
 
+	private startFfmpegRecorder(streamUrl: string, filename: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			// FFmpeg arguments based on the bash script
+			const ffmpegArgs = [
+				'-user_agent',
+				USER_AGENT,
+				'-live_start_index',
+				'-99999',
+				'-i',
+				streamUrl,
+				'-acodec',
+				'copy',
+				'-vcodec',
+				'copy',
+				filename,
+			];
+
+			// Spawn ffmpeg process
+			this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+				stdio: 'inherit', // Pass through stdin, stdout, stderr
+			});
+
+			// Handle ffmpeg process events
+			this.ffmpegProcess.on('close', (code) => {
+				Logger.info('PLAYER', `Recording ended (exit code: ${code})`);
+				this.cleanup();
+				resolve();
+			});
+
+			this.ffmpegProcess.on('error', (error) => {
+				Logger.error('PLAYER', 'FFmpeg error:', error);
+				this.cleanup();
+				reject(error);
+			});
+		});
+	}
+
+	private generateRecordingFilename(): string {
+		const now = new Date();
+		const year = now.getFullYear();
+		const month = String(now.getMonth() + 1).padStart(2, '0');
+		const day = String(now.getDate()).padStart(2, '0');
+		const hour = String(now.getHours()).padStart(2, '0');
+		const minute = String(now.getMinutes()).padStart(2, '0');
+		const second = String(now.getSeconds()).padStart(2, '0');
+
+		return `recording-${year}-${month}-${day}-${hour}${minute}${second}.ts`;
+	}
+
 	private startHeartbeat(): void {
 		if (!this.playToken) return;
 
@@ -143,6 +270,12 @@ export class PlayerService {
 		if (this.mpvProcess && !this.mpvProcess.killed) {
 			this.mpvProcess.kill();
 			this.mpvProcess = null;
+		}
+
+		// Kill ffmpeg process if still running
+		if (this.ffmpegProcess && !this.ffmpegProcess.killed) {
+			this.ffmpegProcess.kill();
+			this.ffmpegProcess = null;
 		}
 
 		this.playToken = null;
@@ -182,6 +315,19 @@ export class PlayerService {
 				resolve(code === 0);
 			});
 			mpvCheck.on('error', () => {
+				resolve(false);
+			});
+		});
+	}
+
+	// Check if ffmpeg is available
+	static async checkFfmpegAvailable(): Promise<boolean> {
+		return new Promise((resolve) => {
+			const ffmpegCheck = spawn('ffmpeg', ['-version'], { stdio: 'pipe' });
+			ffmpegCheck.on('close', (code) => {
+				resolve(code === 0);
+			});
+			ffmpegCheck.on('error', () => {
 				resolve(false);
 			});
 		});
